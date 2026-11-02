@@ -19,8 +19,12 @@ extern NSNotificationName UIPresentationControllerPresentationTransitionWillBegi
 - (UIView *)buttonGlassView;
 @end
 
-// private functions
-extern BOOL _UISolariumEnabled(void) __attribute__((weak_import));
+// private functions (looked up at runtime; symbol only exists on iOS 26+)
+#include <dlfcn.h>
+static inline BOOL PLLiquidGlassEnabled(void) {
+    static BOOL (*fn)(void) = (BOOL(*)(void))dlsym(RTLD_DEFAULT, "_UISolariumEnabled");
+    return fn && fn();
+}
 
 @interface UIBarButtonItem(private)
 - (UIView *)view;
