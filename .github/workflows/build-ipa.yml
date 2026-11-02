@@ -1,0 +1,67 @@
+name: Build Offline Amethyst IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (cmake, gmake, ldid)
+        run: |
+          brew install gnu-make cmake || true
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid 2>/dev/null || true
+          fi
+          if ! command -v ldid >/dev/null 2>&1; then
+            curl -fsSL -o /tmp/ldid https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macos_arm64 2>/dev/null \
+              || curl -fsSL -o /tmp/ldid https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macos_x86_64 2>/dev/null \
+              || true
+            if [ -s /tmp/ldid ]; then
+              chmod +x /tmp/ldid
+              sudo mv /tmp/ldid /usr/local/bin/ldid
+            fi
+          fi
+          command -v cmake && command -v gmake && command -v ldid || echo "WARN: some tools missing"
+
+      - name: Install JDK 8
+        run: |
+          brew tap homebrew/cask-versions 2>/dev/null || true
+          brew install --cask temurin@8 2>/dev/null || brew install --cask temurin8 2>/dev/null || true
+
+      - name: Locate JDK 8
+        run: |
+          JDK8=$(/usr/libexec/java_home -v 1.8 2>/dev/null || true)
+          if [ -z "$JDK8" ]; then
+            for d in /Library/Java/JavaVirtualMachines/*; do
+              if [ -x "$d/Contents/Home/bin/javac" ]; then
+                ver=$("$d/Contents/Home/bin/javac" -version 2>&1 | grep -oE '1\.8\.0')
+                if [ "$ver" = "1.8.0" ]; then JDK8="$d/Contents/Home"; break; fi
+              fi
+            done
+          fi
+          echo "JDK8=$JDK8" >> "$GITHUB_ENV"
+          if [ -n "$JDK8" ]; then "$JDK8/bin/javac" -version; else echo "WARN: JDK 8 not found, build may fail"; fi
+
+      - name: Build IPA
+        run: |
+          export PATH="$(brew --prefix gnu-make)/libexec/gnubin:$(brew --prefix)/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          echo "PATH=$PATH"
+          if [ -n "$JDK8" ]; then
+            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 BOOTJDK="$JDK8/bin"
+          else
+            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2
+          fi
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amethyst-Offline-IPA
+          path: |
+            artifacts/*.ipa
+            artifacts/*.tipa
+            artifacts/*.dSYM
+          if-no-files-found: error
