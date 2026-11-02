@@ -150,6 +150,10 @@
         [self actionLoginLocal:sender];
     }];
     [picker addAction:actionLocal];
+    UIAlertAction *actionDemo = [UIAlertAction actionWithTitle:localize(@"login.option.demo", nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [self actionCreateDemo:sender];
+    }];
+    [picker addAction:actionDemo];
     UIAlertAction *cancel = [UIAlertAction actionWithTitle:localize(@"Cancel", nil) style:UIAlertActionStyleCancel handler:nil];
     [picker addAction:cancel];
 
@@ -192,6 +196,24 @@
     }]];
     [controller addAction:[UIAlertAction actionWithTitle:localize(@"Cancel", nil) style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:controller animated:YES completion:nil];
+}
+
+- (void)actionCreateDemo:(UIView *)sender {
+    // Create an offline demo account (username starts with "Demo.") so it can be
+    // recognised as a Demo account by stock Amethyst/PojavLauncher and exported
+    // to another install.
+    NSString *baseName = @"Demo.Player";
+    NSString *demoName = baseName;
+    for (int i = 0; i < 20; i++) {
+        NSString *path = [NSString stringWithFormat:@"%s/accounts/%@.json", getenv("AME_HOME"), demoName];
+        if (![NSFileManager.defaultManager fileExistsAtPath:path]) break;
+        demoName = [baseName stringByAppendingFormat:@"%d", i];
+    }
+    id callback = ^(id status, BOOL success) {
+        self.whenItemSelected();
+        [self dismissViewControllerAnimated:YES completion:nil];
+    };
+    [[[LocalAuthenticator alloc] initWithInput:demoName] loginWithCallback:callback];
 }
 
 - (void)actionLoginMicrosoft:(UITableViewCell *)sender {
