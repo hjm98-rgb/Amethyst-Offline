@@ -12,7 +12,7 @@ jobs:
 
       - name: Install build tools (cmake, gmake, ldid)
         run: |
-          brew install gnu-make cmake || true
+          brew install make cmake
           if ! command -v ldid >/dev/null 2>&1; then
             brew install ldid 2>/dev/null || true
           fi
@@ -48,7 +48,7 @@ jobs:
 
       - name: Build IPA
         run: |
-          export PATH="$(brew --prefix gnu-make)/libexec/gnubin:$(brew --prefix)/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix)/bin:/usr/bin:/bin:/usr/sbin:/sbin"
           echo "PATH=$PATH"
           if [ -n "$JDK8" ]; then
             gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 BOOTJDK="$JDK8/bin"
