@@ -188,16 +188,26 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     ].mutableCopy;
 
     AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
-    [manager GET:@"https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" parameters:nil headers:nil progress:^(NSProgress * _Nonnull progress) {
-        self.progressViewMain.progress = progress.fractionCompleted;
-    } success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
+    void(^onVersionList)(NSDictionary *) = ^(NSDictionary *responseObject) {
         [remoteVersionList addObjectsFromArray:responseObject[@"versions"]];
         NSDebugLog(@"[VersionList] Got %d versions", remoteVersionList.count);
         setPrefObject(@"internal.latest_version", responseObject[@"latest"]);
         [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
+    };
+    [manager GET:@"https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" parameters:nil headers:nil progress:^(NSProgress * _Nonnull progress) {
+        self.progressViewMain.progress = progress.fractionCompleted;
+    } success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
+        onVersionList(responseObject);
     } failure:^(NSURLSessionTask *operation, NSError *error) {
-        NSDebugLog(@"[VersionList] Warning: Unable to fetch version list: %@", error.localizedDescription);
-        [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
+        // Mojang's manifest is often unreachable from mainland China.
+        // Fall back to the BMCLAPI mirror so the full version list still appears.
+        NSDebugLog(@"[VersionList] Warning: Mojang manifest failed (%@), trying BMCLAPI mirror", error.localizedDescription);
+        [manager GET:@"https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json" parameters:nil headers:nil progress:nil success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
+            onVersionList(responseObject);
+        } failure:^(NSURLSessionTask *operation, NSError *error2) {
+            NSDebugLog(@"[VersionList] Warning: Unable to fetch version list from mirror: %@", error2.localizedDescription);
+            [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
+        }];
     }];
 }
 

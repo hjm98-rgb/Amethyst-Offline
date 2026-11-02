@@ -28,6 +28,30 @@
     return self;
 }
 
+// Rewrite Mojang download URLs to their BMCLAPI mirror (reaches mainland China).
+// Used as a one-time fallback when the original Mojang URL fails.
+- (NSString *)mirrorURL:(NSString *)url {
+    if ([url hasPrefix:@"https://piston-meta.mojang.com/"]) {
+        return [url stringByReplacingOccurrencesOfString:@"https://piston-meta.mojang.com/" withString:@"https://bmclapi2.bangbang93.com/"];
+    }
+    if ([url hasPrefix:@"https://libraries.minecraft.net/"]) {
+        return [url stringByReplacingOccurrencesOfString:@"https://libraries.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/maven/"];
+    }
+    if ([url hasPrefix:@"https://resources.download.minecraft.net/"]) {
+        return [url stringByReplacingOccurrencesOfString:@"https://resources.download.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/assets/"];
+    }
+    if ([url hasPrefix:@"http://piston-meta.mojang.com/"]) {
+        return [url stringByReplacingOccurrencesOfString:@"http://piston-meta.mojang.com/" withString:@"https://bmclapi2.bangbang93.com/"];
+    }
+    if ([url hasPrefix:@"http://libraries.minecraft.net/"]) {
+        return [url stringByReplacingOccurrencesOfString:@"http://libraries.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/maven/"];
+    }
+    if ([url hasPrefix:@"http://resources.download.minecraft.net/"]) {
+        return [url stringByReplacingOccurrencesOfString:@"http://resources.download.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/assets/"];
+    }
+    return url;
+}
+
 // Add file to the queue
 - (NSURLSessionDownloadTask *)createDownloadTask:(NSString *)url size:(NSUInteger)size sha:(NSString *)sha altName:(NSString *)altName toPath:(NSString *)path success:(void (^)())success {
     BOOL fileExists = [NSFileManager.defaultManager fileExistsAtPath:path];
@@ -57,7 +81,16 @@
         if (self.progress.cancelled) {
             // Ignore any further errors
         } else if (error != nil) {
-            [self finishDownloadWithError:error file:name];
+            // One-time fallback: if the Mojang URL failed (common from mainland China),
+            // retry the same file through the BMCLAPI mirror.
+            NSString *mirrored = [self mirrorURL:url];
+            if (![mirrored isEqualToString:url]) {
+                NSLog(@"[MCDL] Mojang download failed, retrying via mirror: %@", name);
+                NSURLSessionDownloadTask *retry = [self createDownloadTask:mirrored size:size sha:sha altName:altName toPath:path success:success];
+                [retry resume];
+            } else {
+                [self finishDownloadWithError:error file:name];
+            }
         } else if (![self checkSHA:sha forFile:path altName:altName]) {
             [self finishDownloadWithErrorString:[NSString stringWithFormat:@"Failed to verify file %@: SHA1 mismatch", path.lastPathComponent]];
         } else {
