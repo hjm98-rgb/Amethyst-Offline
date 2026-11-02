@@ -22,7 +22,10 @@ extern NSNotificationName UIPresentationControllerPresentationTransitionWillBegi
 // private functions (looked up at runtime; symbol only exists on iOS 26+)
 #include <dlfcn.h>
 static inline BOOL PLLiquidGlassEnabled(void) {
-    static BOOL (*fn)(void) = (BOOL(*)(void))dlsym(RTLD_DEFAULT, "_UISolariumEnabled");
+    static BOOL (*fn)(void) = NULL;
+    if (fn == NULL) {
+        fn = (BOOL(*)(void))dlsym(RTLD_DEFAULT, "_UISolariumEnabled");
+    }
     return fn && fn();
 }
 
