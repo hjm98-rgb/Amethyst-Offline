@@ -26,6 +26,7 @@
 static void *ProgressObserverContext = &ProgressObserverContext;
 
 NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUpdated";
+NSString *const AmethystVersionListFailedNotification = @"AmethystVersionListFailed";
 
 @interface LauncherNavigationController () <UIDocumentPickerDelegate, UIPickerViewDataSource, PLPickerViewDelegate, UIPopoverPresentationControllerDelegate> {
 }
@@ -40,6 +41,7 @@ NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUp
 @property(nonatomic) int profileSelectedAt;
 @property(nonatomic) BOOL fetchingVersionList;
 @property(nonatomic) int versionListFetchAttempt;
+@property(nonatomic, copy) NSString *versionListLastError;
 
 @end
 
@@ -231,6 +233,7 @@ NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUp
     }
     [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
     self.versionListFetchAttempt = 0;
+    self.versionListLastError = nil;
     [NSNotificationCenter.defaultCenter postNotificationName:AmethystVersionListUpdatedNotification object:nil];
 }
 
@@ -294,7 +297,8 @@ NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUp
         [manager GET:url parameters:nil headers:nil progress:nil success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
             finishWithManifest(responseObject, url);
         } failure:^(NSURLSessionTask *task, NSError *error) {
-            NSDebugLog(@"[VersionList] %@ failed: %@", url, error.localizedDescription);
+            NSString *reason = error.localizedDescription ?: @"unknown";
+            NSDebugLog(@"[VersionList] %@ failed: %@", url, reason);
             @synchronized (self) {
                 pending--;
             }
@@ -302,12 +306,16 @@ NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUp
             // Every source failed: keep the UI usable and try again a couple of times.
             dispatch_async(dispatch_get_main_queue(), ^{
                 weakSelf.fetchingVersionList = NO;
+                weakSelf.versionListLastError = reason;
                 [(id)(weakSelf.buttonInstall ?: weakSelf.buttonInstallItem) setEnabled:YES];
                 if (weakSelf.versionListFetchAttempt < 2) {
                     weakSelf.versionListFetchAttempt++;
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         [weakSelf fetchRemoteVersionList];
                     });
+                } else {
+                    [NSNotificationCenter.defaultCenter postNotificationName:AmethystVersionListFailedNotification
+                        object:nil userInfo:@{@"error": reason}];
                 }
             });
         }];
@@ -422,7 +430,11 @@ NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUp
         if (![NSFileManager.defaultManager fileExistsAtPath:localJson]) {
             [self setInteractionEnabled:YES forDownloading:NO];
             [self fetchRemoteVersionList];
-            showDialog(localize(@"Error", nil), localize(@"launcher.version_list.not_ready", nil));
+            NSString *message = localize(@"launcher.version_list.not_ready", nil);
+            if (self.versionListLastError.length > 0) {
+                message = [message stringByAppendingFormat:@"\n(%@)", self.versionListLastError];
+            }
+            showDialog(localize(@"Error", nil), message);
             return;
         }
         object = @{

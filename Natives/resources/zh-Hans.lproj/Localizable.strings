@@ -287,3 +287,5 @@
 
 "launcher.version_list.loading" = "正在加载版本列表…";
 "launcher.version_list.not_ready" = "版本列表还没加载完成，请检查网络后重试。";
+
+"launcher.version_list.failed" = "版本列表加载失败，点这里重试。";

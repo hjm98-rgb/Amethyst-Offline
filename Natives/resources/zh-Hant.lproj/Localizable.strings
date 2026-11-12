@@ -194,3 +194,5 @@
 
 "launcher.version_list.loading" = "正在載入版本列表…";
 "launcher.version_list.not_ready" = "版本列表還沒載入完成，請檢查網路後重試。";
+
+"launcher.version_list.failed" = "版本列表載入失敗，點這裡重試。";

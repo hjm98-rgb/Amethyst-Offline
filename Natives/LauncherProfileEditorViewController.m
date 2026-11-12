@@ -10,6 +10,7 @@
 
 @interface LauncherProfileEditorViewController()<UIPickerViewDataSource, UIPickerViewDelegate>
 @property(nonatomic) NSString* oldName;
+@property(nonatomic, copy) NSString* versionListError;
 
 @property(nonatomic) NSArray<NSDictionary *> *versionList;
 @property(nonatomic) PickTextField* versionTextField;
@@ -156,6 +157,10 @@
         selector:@selector(handleVersionListUpdated:)
         name:AmethystVersionListUpdatedNotification
         object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(handleVersionListFailed:)
+        name:AmethystVersionListFailedNotification
+        object:nil];
 }
 
 - (void)dealloc {
@@ -163,7 +168,13 @@
 }
 
 - (void)handleVersionListUpdated:(NSNotification *)notification {
+    self.versionListError = nil;
     [self rebuildVersionListForSelectedType];
+    [self.versionPickerView reloadAllComponents];
+}
+
+- (void)handleVersionListFailed:(NSNotification *)notification {
+    self.versionListError = notification.userInfo[@"error"] ?: @"unknown";
     [self.versionPickerView reloadAllComponents];
 }
 
@@ -279,7 +290,14 @@
 }
 
 - (void)pickerView:(UIPickerView *)pickerView didSelectRow:(NSInteger)row inComponent:(NSInteger)component {
-    if (self.versionList.count == 0 || self.versionList.count <= row) {
+    if (self.versionList.count == 0) {
+        // Placeholder row: let the user retry by tapping it.
+        self.versionListError = nil;
+        [(LauncherNavigationController *)self.navigationController fetchRemoteVersionList];
+        [self.versionPickerView reloadAllComponents];
+        return;
+    }
+    if (self.versionList.count <= row) {
         return;
     }
     self.versionSelectedAt = row;
@@ -297,7 +315,9 @@
 
 - (NSString *)pickerView:(UIPickerView *)pickerView titleForRow:(NSInteger)row forComponent:(NSInteger)component {
     if (self.versionList.count == 0) {
-        return localize(@"launcher.version_list.loading", nil);
+        return self.versionListError.length > 0
+            ? localize(@"launcher.version_list.failed", nil)
+            : localize(@"launcher.version_list.loading", nil);
     }
     if (self.versionList.count <= row) return nil;
     NSObject *object = self.versionList[row];

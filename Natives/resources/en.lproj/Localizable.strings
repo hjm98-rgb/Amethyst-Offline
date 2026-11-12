@@ -335,3 +335,5 @@
 
 "launcher.version_list.loading" = "Loading version list...";
 "launcher.version_list.not_ready" = "The version list has not loaded yet. Check your network and try again in a moment.";
+
+"launcher.version_list.failed" = "Failed to load the version list. Tap to retry.";
