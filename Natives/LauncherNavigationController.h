@@ -2,6 +2,9 @@
 
 NSMutableArray<NSDictionary *> *localVersionList, *remoteVersionList;
 
+// Posted on the main queue whenever remoteVersionList has been (re)loaded.
+extern NSString *const AmethystVersionListUpdatedNotification;
+
 @interface LauncherNavigationController : UINavigationController
 
 @property(nonatomic) UIProgressView *progressViewMain, *progressViewSub;
@@ -9,6 +12,7 @@ NSMutableArray<NSDictionary *> *localVersionList, *remoteVersionList;
 
 - (void)enterModInstallerWithPath:(NSString *)path hitEnterAfterWindowShown:(BOOL)hitEnter;
 - (void)fetchLocalVersionList;
+- (void)fetchRemoteVersionList;
 - (void)setInteractionEnabled:(BOOL)enable forDownloading:(BOOL)downloading;
 
 @end

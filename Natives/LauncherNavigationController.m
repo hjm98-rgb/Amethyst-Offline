@@ -25,6 +25,8 @@
 
 static void *ProgressObserverContext = &ProgressObserverContext;
 
+NSString *const AmethystVersionListUpdatedNotification = @"AmethystVersionListUpdated";
+
 @interface LauncherNavigationController () <UIDocumentPickerDelegate, UIPickerViewDataSource, PLPickerViewDelegate, UIPopoverPresentationControllerDelegate> {
 }
 
@@ -36,6 +38,8 @@ static void *ProgressObserverContext = &ProgressObserverContext;
 @property(nonatomic) UIButton* buttonInstall;
 @property(nonatomic) UIBarButtonItem* buttonInstallItem;
 @property(nonatomic) int profileSelectedAt;
+@property(nonatomic) BOOL fetchingVersionList;
+@property(nonatomic) int versionListFetchAttempt;
 
 @end
 
@@ -128,6 +132,10 @@ static void *ProgressObserverContext = &ProgressObserverContext;
 
     [self fetchRemoteVersionList];
     [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(applicationDidBecomeActive:)
+        name:UIApplicationDidBecomeActiveNotification
+        object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
         selector:@selector(receiveNotification:) 
         name:@"InstallModpack"
         object:nil];
@@ -162,6 +170,15 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     return isDirectory;
 }
 
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    // Returning from another app (JIT helper, browser, ...) is a good moment to
+    // retry a version list that never made it through.
+    if (remoteVersionList.count <= 2 && !self.fetchingVersionList) {
+        self.versionListFetchAttempt = 0;
+        [self fetchRemoteVersionList];
+    }
+}
+
 - (void)fetchLocalVersionList {
     if (!localVersionList) {
         localVersionList = [NSMutableArray new];
@@ -180,35 +197,121 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     }
 }
 
-- (void)fetchRemoteVersionList {
-    [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:NO];
-    remoteVersionList = @[
+- (NSString *)versionManifestCachePath {
+    return [NSString stringWithFormat:@"%s/cache/version_manifest_v2.json", getenv("AME_HOME")];
+}
+
+// Cache the manifest so the version list shows up instantly even when the
+// network is slow/unavailable at launch.
+- (void)saveVersionManifestToCache:(NSDictionary *)manifest {
+    NSString *path = [self versionManifestCachePath];
+    [NSFileManager.defaultManager createDirectoryAtPath:path.stringByDeletingLastPathComponent
+                             withIntermediateDirectories:YES attributes:nil error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:nil];
+    [data writeToFile:path atomically:YES];
+}
+
+- (void)applyVersionManifest:(NSDictionary *)manifest persist:(BOOL)persist {
+    NSArray *versions = manifest[@"versions"];
+    if (![versions isKindOfClass:NSArray.class] || versions.count == 0) {
+        return;
+    }
+    NSMutableArray *list = @[
         @{@"id": @"latest-release", @"type": @"release"},
         @{@"id": @"latest-snapshot", @"type": @"snapshot"}
     ].mutableCopy;
+    [list addObjectsFromArray:versions];
+    remoteVersionList = list;
+    if ([manifest[@"latest"] isKindOfClass:NSDictionary.class]) {
+        setPrefObject(@"internal.latest_version", manifest[@"latest"]);
+    }
+    NSDebugLog(@"[VersionList] Got %d versions", remoteVersionList.count);
+    if (persist) {
+        [self saveVersionManifestToCache:manifest];
+    }
+    [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
+    self.versionListFetchAttempt = 0;
+    [NSNotificationCenter.defaultCenter postNotificationName:AmethystVersionListUpdatedNotification object:nil];
+}
+
+- (void)fetchRemoteVersionList {
+    [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:NO];
+    if (self.versionListFetchAttempt == 0 || remoteVersionList.count <= 2) {
+        remoteVersionList = @[
+            @{@"id": @"latest-release", @"type": @"release"},
+            @{@"id": @"latest-snapshot", @"type": @"snapshot"}
+        ].mutableCopy;
+    }
+
+    // 1) Show anything we already know about before touching the network.
+    if (remoteVersionList.count <= 2) {
+        NSDictionary *cached = parseJSONFromFile([self versionManifestCachePath]);
+        if ([cached[@"versions"] isKindOfClass:NSArray.class] && [cached[@"versions"] count] > 0) {
+            NSDebugLog(@"[VersionList] Using cached manifest (%d versions)", [cached[@"versions"] count]);
+            [self applyVersionManifest:cached persist:NO];
+        }
+    }
+
+    if (self.fetchingVersionList) {
+        return;
+    }
+    self.fetchingVersionList = YES;
+
+    // 2) Ask several endpoints at once; the first valid answer wins, so a single
+    //    blocked/slow host can no longer leave the list spinning forever.
+    static NSArray<NSString *> *sources;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sources = @[
+            @"https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+            @"https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json",
+            @"https://bmclapi.bangbang93.com/mc/game/version_manifest_v2.json",
+            @"https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
+        ];
+    });
 
     AFHTTPSessionManager *manager = [AFHTTPSessionManager manager];
-    void(^onVersionList)(NSDictionary *) = ^(NSDictionary *responseObject) {
-        [remoteVersionList addObjectsFromArray:responseObject[@"versions"]];
-        NSDebugLog(@"[VersionList] Got %d versions", remoteVersionList.count);
-        setPrefObject(@"internal.latest_version", responseObject[@"latest"]);
-        [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
+    manager.requestSerializer.timeoutInterval = 12;
+    manager.responseSerializer.acceptableContentTypes = [NSSet setWithObjects:
+        @"application/json", @"text/json", @"text/plain", @"text/html", nil];
+
+    __block BOOL finished = NO;
+    __block int pending = (int)sources.count;
+    __weak LauncherNavigationController *weakSelf = self;
+
+    void(^finishWithManifest)(NSDictionary *, NSString *) = ^(NSDictionary *manifest, NSString *source) {
+        if (finished) return;
+        if (![manifest[@"versions"] isKindOfClass:NSArray.class] || [manifest[@"versions"] count] == 0) return;
+        finished = YES;
+        NSDebugLog(@"[VersionList] Loaded %d versions from %@", [manifest[@"versions"] count], source);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            weakSelf.fetchingVersionList = NO;
+            [weakSelf applyVersionManifest:manifest persist:YES];
+        });
     };
-    [manager GET:@"https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" parameters:nil headers:nil progress:^(NSProgress * _Nonnull progress) {
-        self.progressViewMain.progress = progress.fractionCompleted;
-    } success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
-        onVersionList(responseObject);
-    } failure:^(NSURLSessionTask *operation, NSError *error) {
-        // Mojang's manifest is often unreachable from mainland China.
-        // Fall back to the BMCLAPI mirror so the full version list still appears.
-        NSDebugLog(@"[VersionList] Warning: Mojang manifest failed (%@), trying BMCLAPI mirror", error.localizedDescription);
-        [manager GET:@"https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json" parameters:nil headers:nil progress:nil success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
-            onVersionList(responseObject);
-        } failure:^(NSURLSessionTask *operation, NSError *error2) {
-            NSDebugLog(@"[VersionList] Warning: Unable to fetch version list from mirror: %@", error2.localizedDescription);
-            [(id)(self.buttonInstall ?: self.buttonInstallItem) setEnabled:YES];
+
+    for (NSString *url in sources) {
+        [manager GET:url parameters:nil headers:nil progress:nil success:^(NSURLSessionTask *task, NSDictionary *responseObject) {
+            finishWithManifest(responseObject, url);
+        } failure:^(NSURLSessionTask *task, NSError *error) {
+            NSDebugLog(@"[VersionList] %@ failed: %@", url, error.localizedDescription);
+            @synchronized (self) {
+                pending--;
+            }
+            if (pending > 0 || finished) return;
+            // Every source failed: keep the UI usable and try again a couple of times.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.fetchingVersionList = NO;
+                [(id)(weakSelf.buttonInstall ?: weakSelf.buttonInstallItem) setEnabled:YES];
+                if (weakSelf.versionListFetchAttempt < 2) {
+                    weakSelf.versionListFetchAttempt++;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        [weakSelf fetchRemoteVersionList];
+                    });
+                }
+            });
         }];
-    }];
+    }
 }
 
 // Invoked by: startup, instance change event
@@ -305,8 +408,23 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     [self setInteractionEnabled:NO forDownloading:YES];
 
     NSString *versionId = PLProfiles.current.profiles[self.versionTextField.text][@"lastVersionId"];
+    if (versionId.length == 0) {
+        [self setInteractionEnabled:YES forDownloading:NO];
+        [self.versionTextField becomeFirstResponder];
+        return;
+    }
     NSDictionary *object = [remoteVersionList filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"(id == %@)", versionId]].firstObject;
     if (!object) {
+        // The manifest may not have arrived yet. Only treat the version as a
+        // local/custom one when its JSON actually exists on disk, otherwise the
+        // download would fail with a confusing "file not found" error.
+        NSString *localJson = [NSString stringWithFormat:@"%s/versions/%@/%@.json", getenv("GAME_DIR"), versionId, versionId];
+        if (![NSFileManager.defaultManager fileExistsAtPath:localJson]) {
+            [self setInteractionEnabled:YES forDownloading:NO];
+            [self fetchRemoteVersionList];
+            showDialog(localize(@"Error", nil), localize(@"launcher.version_list.not_ready", nil));
+            return;
+        }
         object = @{
             @"id": versionId,
             @"type": @"custom"
@@ -433,7 +551,12 @@ static void *ProgressObserverContext = &ProgressObserverContext;
 }
 
 - (void)invokeAfterJITEnabled:(void(^)(void))handler {
-    localVersionList = remoteVersionList = nil;
+    // Only drop the local (installed) list; the remote list is still valid and
+    // wiping it here used to leave users with an empty version picker after JIT.
+    localVersionList = nil;
+    if (remoteVersionList.count <= 2) {
+        [self fetchRemoteVersionList];
+    }
     BOOL hasTrollStoreJIT = getEntitlementValue(@"jb.pmap_cs.custom_trust");
     BOOL isLiveContainer = getenv("LC_HOME_PATH") != NULL;
 

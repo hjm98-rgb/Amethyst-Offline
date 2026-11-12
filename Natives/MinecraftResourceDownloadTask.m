@@ -12,6 +12,7 @@
 
 @interface MinecraftResourceDownloadTask ()
 @property AFURLSessionManager* manager;
+@property(nonatomic) BOOL preferMirror;
 @end
 
 @implementation MinecraftResourceDownloadTask
@@ -20,7 +21,9 @@
     self = [super init];
     // TODO: implement background download
     NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
-    configuration.timeoutIntervalForRequest = 86400;
+    // Inactivity timeout, not total transfer time: big files still download fine
+    // while a black-holed Mojang host fails quickly instead of hanging for a day.
+    configuration.timeoutIntervalForRequest = 30;
     //backgroundSessionConfigurationWithIdentifier:@"net.kdt.pojavlauncher.downloadtask"];
     self.manager = [[AFURLSessionManager alloc] initWithSessionConfiguration:configuration];
     self.fileList = [NSMutableArray new];
@@ -28,32 +31,64 @@
     return self;
 }
 
-// Rewrite Mojang download URLs to their BMCLAPI mirror (reaches mainland China).
-// Used as a one-time fallback when the original Mojang URL fails.
-- (NSString *)mirrorURL:(NSString *)url {
-    if ([url hasPrefix:@"https://piston-meta.mojang.com/"]) {
-        return [url stringByReplacingOccurrencesOfString:@"https://piston-meta.mojang.com/" withString:@"https://bmclapi2.bangbang93.com/"];
+// Ordered list of URLs to try for a Mojang resource: the original one plus the
+// BMCLAPI mirrors. Big-file hosts (client jar, assets, libraries) go through the
+// China mirror first because those domains are commonly unreachable there.
+- (NSArray<NSString *> *)candidateURLsForURL:(NSString *)url {
+    static NSArray<NSArray<NSString *> *> *routes;
+    static NSArray<NSString *> *mirrorHosts;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        routes = @[
+            @[@"https://piston-meta.mojang.com/", @""],
+            @[@"https://piston-data.mojang.com/", @""],
+            @[@"https://launchermeta.mojang.com/", @""],
+            @[@"https://launcher.mojang.com/", @""],
+            @[@"https://libraries.minecraft.net/", @"maven/"],
+            @[@"https://resources.download.minecraft.net/", @"assets/"]
+        ];
+        mirrorHosts = @[
+            @"https://bmclapi2.bangbang93.com/",
+            @"https://bmclapi.bangbang93.com/"
+        ];
+    });
+
+    NSString *httpsURL = url;
+    if ([httpsURL hasPrefix:@"http://"]) {
+        httpsURL = [@"https://" stringByAppendingString:[httpsURL substringFromIndex:@"http://".length]];
     }
-    if ([url hasPrefix:@"https://libraries.minecraft.net/"]) {
-        return [url stringByReplacingOccurrencesOfString:@"https://libraries.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/maven/"];
+
+    for (NSArray<NSString *> *route in routes) {
+        NSString *prefix = route[0];
+        if (![httpsURL hasPrefix:prefix]) continue;
+
+        NSString *rest = [httpsURL substringFromIndex:prefix.length];
+        NSMutableArray *mirrors = [NSMutableArray new];
+        for (NSString *host in mirrorHosts) {
+            [mirrors addObject:[NSString stringWithFormat:@"%@%@%@", host, route[1], rest]];
+        }
+
+        BOOL mirrorFirst = self.preferMirror
+            || [prefix containsString:@"piston-data.mojang.com"]
+            || [prefix containsString:@"launcher.mojang.com"]
+            || [prefix containsString:@"libraries.minecraft.net"]
+            || [prefix containsString:@"resources.download.minecraft.net"];
+        if (mirrorFirst) {
+            [mirrors addObject:httpsURL];
+            return mirrors;
+        }
+        return [@[httpsURL] arrayByAddingObjectsFromArray:mirrors];
     }
-    if ([url hasPrefix:@"https://resources.download.minecraft.net/"]) {
-        return [url stringByReplacingOccurrencesOfString:@"https://resources.download.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/assets/"];
-    }
-    if ([url hasPrefix:@"http://piston-meta.mojang.com/"]) {
-        return [url stringByReplacingOccurrencesOfString:@"http://piston-meta.mojang.com/" withString:@"https://bmclapi2.bangbang93.com/"];
-    }
-    if ([url hasPrefix:@"http://libraries.minecraft.net/"]) {
-        return [url stringByReplacingOccurrencesOfString:@"http://libraries.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/maven/"];
-    }
-    if ([url hasPrefix:@"http://resources.download.minecraft.net/"]) {
-        return [url stringByReplacingOccurrencesOfString:@"http://resources.download.minecraft.net/" withString:@"https://bmclapi2.bangbang93.com/assets/"];
-    }
-    return url;
+    return @[url];
 }
 
 // Add file to the queue
 - (NSURLSessionDownloadTask *)createDownloadTask:(NSString *)url size:(NSUInteger)size sha:(NSString *)sha altName:(NSString *)altName toPath:(NSString *)path success:(void (^)())success {
+    return [self createDownloadTask:[self candidateURLsForURL:url] index:0 size:size sha:sha altName:altName toPath:path success:success];
+}
+
+- (NSURLSessionDownloadTask *)createDownloadTask:(NSArray<NSString *> *)candidates index:(NSInteger)index size:(NSUInteger)size sha:(NSString *)sha altName:(NSString *)altName toPath:(NSString *)path success:(void (^)())success {
+    NSString *url = candidates[index];
     BOOL fileExists = [NSFileManager.defaultManager fileExistsAtPath:path];
     // logSuccess?
     if (fileExists && [self checkSHA:sha forFile:path altName:altName]) {
@@ -68,7 +103,7 @@
     __block NSProgress *progress;
     __block NSURLSessionDownloadTask *task = [self.manager downloadTaskWithRequest:request progress:nil
     destination:^NSURL * _Nonnull(NSURL * _Nonnull targetPath, NSURLResponse * _Nonnull response) {
-        NSLog(@"[MCDL] Downloading %@", name);
+        NSLog(@"[MCDL] Downloading %@ from %@", name, url);
         progress = [self.manager downloadProgressForTask:task];
         if (!size && task) {
             [self addDownloadTaskToProgress:task size:response.expectedContentLength];
@@ -81,12 +116,20 @@
         if (self.progress.cancelled) {
             // Ignore any further errors
         } else if (error != nil) {
-            // One-time fallback: if the Mojang URL failed (common from mainland China),
-            // retry the same file through the BMCLAPI mirror.
-            NSString *mirrored = [self mirrorURL:url];
-            if (![mirrored isEqualToString:url]) {
-                NSLog(@"[MCDL] Mojang download failed, retrying via mirror: %@", name);
-                NSURLSessionDownloadTask *retry = [self createDownloadTask:mirrored size:size sha:sha altName:altName toPath:path success:success];
+            // Try the next candidate (Mojang -> BMCLAPI -> alternate mirror) and
+            // remember to go straight to the mirror for the remaining files.
+            NSInteger next = index + 1;
+            if (next < candidates.count) {
+                // Prefer the mirror for the rest of the queue: if one Mojang
+                // request died, the remaining ones usually die the same way.
+                if (index == 0) {
+                    self.preferMirror = YES;
+                }
+                NSLog(@"[MCDL] %@ failed on %@, retrying via %@", name, url, candidates[next]);
+                if (progress) {
+                    progress.totalUnitCount = progress.completedUnitCount;
+                }
+                NSURLSessionDownloadTask *retry = [self createDownloadTask:candidates index:next size:size sha:sha altName:altName toPath:path success:success];
                 [retry resume];
             } else {
                 [self finishDownloadWithError:error file:name];

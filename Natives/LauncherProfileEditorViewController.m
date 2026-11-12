@@ -149,6 +149,46 @@
     ];
 
     [super viewDidLoad];
+
+    // Refresh the picker in place when the version manifest finally arrives
+    // instead of leaving "Installed" empty until the screen is reopened.
+    [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(handleVersionListUpdated:)
+        name:AmethystVersionListUpdatedNotification
+        object:nil];
+}
+
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+- (void)handleVersionListUpdated:(NSNotification *)notification {
+    [self rebuildVersionListForSelectedType];
+    [self.versionPickerView reloadAllComponents];
+}
+
+- (void)rebuildVersionListForSelectedType {
+    NSInteger index = self.versionTypeControl.selectedSegmentIndex;
+    NSArray *list;
+    if (index == 0) {
+        list = localVersionList ?: @[];
+    } else {
+        NSString *type = @[@"installed", @"release", @"snapshot", @"old_beta", @"old_alpha"][index];
+        list = [remoteVersionList filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"(type == %@)", type]] ?: @[];
+    }
+    self.versionList = list;
+
+    if (list.count == 0) {
+        return;
+    }
+    NSDictionary *selected = (id)[MinecraftResourceUtils findVersion:self.versionTextField.text inList:list];
+    NSInteger row = [list indexOfObject:selected];
+    if (row != (NSInteger)NSNotFound) {
+        self.versionSelectedAt = (int)row;
+        [self.versionPickerView selectRow:row inComponent:0 animated:NO];
+    } else if (self.versionSelectedAt >= 0 && self.versionSelectedAt < (int)list.count) {
+        [self.versionPickerView selectRow:self.versionSelectedAt inComponent:0 animated:NO];
+    }
 }
 
 - (void)actionClose {
@@ -236,8 +276,7 @@
 }
 
 - (void)pickerView:(UIPickerView *)pickerView didSelectRow:(NSInteger)row inComponent:(NSInteger)component {
-    if (self.versionList.count == 0) {
-        self.versionTextField.text = @"";
+    if (self.versionList.count == 0 || self.versionList.count <= row) {
         return;
     }
     self.versionSelectedAt = row;
@@ -249,10 +288,14 @@
 }
 
 - (NSInteger)pickerView:(UIPickerView *)pickerView numberOfRowsInComponent:(NSInteger)component {
-    return self.versionList.count;
+    // Never return 0: an empty UIPickerView looks like the list is broken.
+    return MAX((NSInteger)self.versionList.count, 1);
 }
 
 - (NSString *)pickerView:(UIPickerView *)pickerView titleForRow:(NSInteger)row forComponent:(NSInteger)component {
+    if (self.versionList.count == 0) {
+        return localize(@"launcher.version_list.loading", nil);
+    }
     if (self.versionList.count <= row) return nil;
     NSObject *object = self.versionList[row];
     if ([object isKindOfClass:[NSString class]]) {
@@ -301,6 +344,12 @@
 
     self.versionList = newVersionList;
     [self.versionPickerView reloadAllComponents];
+
+    // Nothing to show yet? Ask the launcher to (re)load the manifest instead of
+    // leaving the user with an empty "Releases" list.
+    if (newVersionList.count == 0 && remoteVersionList.count <= 2) {
+        [(LauncherNavigationController *)self.navigationController fetchRemoteVersionList];
+    }
     if (self.versionSelectedAt != -1) {
         [self.versionPickerView selectRow:self.versionSelectedAt inComponent:0 animated:NO];
         [self pickerView:self.versionPickerView didSelectRow:self.versionSelectedAt inComponent:0];

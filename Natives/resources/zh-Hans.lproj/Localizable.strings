@@ -284,3 +284,6 @@
 "controller_configurator.section.footer.menu_mappings" = "当鼠标未被锁定时，如在标题屏幕或暂停菜单中时绑定。";
 "controller_configurator.section.controller_style" = "手柄类型";
 "controller_configurator.section.footer.controller_style" = "在此配置器中显示不同的手柄按钮名称。";
+
+"launcher.version_list.loading" = "正在加载版本列表…";
+"launcher.version_list.not_ready" = "版本列表还没加载完成，请检查网络后重试。";
