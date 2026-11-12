@@ -169,6 +169,9 @@
 
 - (void)rebuildVersionListForSelectedType {
     NSInteger index = self.versionTypeControl.selectedSegmentIndex;
+    if (index < 0 || index > 4) {
+        index = 0;
+    }
     NSArray *list;
     if (index == 0) {
         list = localVersionList ?: @[];
